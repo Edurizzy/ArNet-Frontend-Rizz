@@ -1,0 +1,12 @@
+// CRM Feature Components
+export { CrmLayout } from './crm-layout'
+export { CustomerFilters } from './customer-filters'
+export { CustomerTable } from './customer-table'
+export { CustomerTableHeader } from './customer-table-header'
+export { CustomerRow } from './customer-row'
+export { CustomerDetailPanel } from './customer-detail-panel'
+export { SubscriptionCard } from './subscription-card'
+export { OmnichannelIdentities } from './omnichannel-identities'
+export { OmnichannelIndicators } from './omnichannel-indicators'
+export { FinancialStatusBadge } from './financial-status-badge'
+export { CustomerMetadata } from './customer-metadata'
