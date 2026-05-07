@@ -1,0 +1,13 @@
+// Atendimento module exports
+export { AtendimentoLayout } from './atendimento-layout'
+export { TicketQueue } from './ticket-queue'
+export { TicketCard } from './ticket-card'
+export { ChatArea } from './chat-area'
+export { ConversationHeader } from './conversation-header'
+export { SLATimer } from './sla-timer'
+export { MessageBubble } from './message-bubble'
+export { AIConfidenceBadge } from './ai-confidence-badge'
+export { HandoffEvent } from './handoff-event'
+export { MessageComposer } from './message-composer'
+export { CustomerContext } from './customer-context'
+export { CustomerTag } from './customer-tag'
