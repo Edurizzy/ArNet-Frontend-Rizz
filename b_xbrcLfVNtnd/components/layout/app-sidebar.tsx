@@ -6,6 +6,7 @@ import {
   Users, 
   Bot,
   Workflow,
+  Settings,
   ChevronLeft,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -36,6 +37,7 @@ const navItems: NavItem[] = [
   { id: 'clientes', label: 'Clientes', icon: Users },
   { id: 'ai-studio', label: 'AI Studio', icon: Bot },
   { id: 'automacoes', label: 'Automações', icon: Workflow },
+  { id: 'configuracoes', label: 'Configurações', icon: Settings },
 ]
 
 export function AppSidebar() {

@@ -13,6 +13,7 @@ import { AtendimentoView } from '@/components/views/atendimento-view'
 import { ClientesView } from '@/components/views/clientes-view'
 import { AIStudioView } from '@/components/views/ai-studio-view'
 import { AutomacoesView } from '@/components/views/automacoes-view'
+import { SettingsView } from '@/components/views/settings-view'
 
 export function MainLayout() {
   const { currentRoute } = useNavigationStore()
@@ -50,6 +51,8 @@ export function MainLayout() {
         return <AIStudioView />
       case 'automacoes':
         return <AutomacoesView />
+      case 'configuracoes':
+        return <SettingsView />
       default:
         return <DashboardView />
     }

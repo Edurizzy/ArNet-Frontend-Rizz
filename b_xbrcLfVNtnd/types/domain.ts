@@ -62,7 +62,7 @@ export interface AIAgent {
 }
 
 // Navigation types
-export type NavigationRoute = 'dashboard' | 'atendimento' | 'clientes' | 'ai-studio' | 'automacoes'
+export type NavigationRoute = 'dashboard' | 'atendimento' | 'clientes' | 'ai-studio' | 'automacoes' | 'configuracoes'
 
 export interface NavigationItem {
   id: NavigationRoute
