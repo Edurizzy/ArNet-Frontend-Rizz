@@ -60,7 +60,7 @@ function normalizeUser(user: LoginResponse['user']): AuthUser {
 }
 
 function isAuthEndpoint(path: string) {
-  return path.includes('/iam/login/') || path.includes('/iam/token/refresh/') || path.includes('/iam/refresh/')
+  return path.includes('/auth/login/') || path.includes('/auth/refresh/')
 }
 
 function buildHeaders(config: ApiRequestConfig, withAuth: boolean) {
@@ -156,7 +156,7 @@ export const publicApiClient = {
 }
 
 export async function loginWithCredentials(email: string, password: string) {
-  const response = await publicApiClient.post<LoginResponse>('/iam/login/', {
+  const response = await publicApiClient.post<LoginResponse>('/auth/login/', {
     email,
     password,
   })
@@ -177,7 +177,7 @@ export async function refreshAccessTokenWithLock(): Promise<string | null> {
   if (!refreshToken) return null
 
   refreshPromise = publicApiClient
-    .post<RefreshResponse>('/iam/token/refresh/', { refresh: refreshToken })
+    .post<RefreshResponse>('/auth/refresh/', { refresh: refreshToken })
     .then((response) => {
       const current = useAuthStore.getState()
       if (!current.user || !current.refreshToken) return null
