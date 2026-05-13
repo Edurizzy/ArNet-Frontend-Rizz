@@ -1,5 +1,6 @@
 import type { Message, CustomerProfile, SLAInfo } from '@/types/atendimento'
 import type { Conversation } from '@/types/domain'
+import { apiClient } from '@/lib/api-client'
 
 type RequestOptions = {
   signal?: AbortSignal
@@ -46,49 +47,6 @@ type MessageApi = {
 }
 
 type DeliveryStatus = NonNullable<Message['metadata']>['deliveryStatus']
-
-const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_BASE_URL ??
-  process.env.NEXT_PUBLIC_API_URL ??
-  'http://127.0.0.1:8000/api/v1'
-
-function getAuthToken() {
-  if (typeof window === 'undefined') return null
-
-  return (
-    window.localStorage.getItem('access_token') ??
-    window.localStorage.getItem('accessToken') ??
-    window.localStorage.getItem('jwt') ??
-    window.localStorage.getItem('token') ??
-    window.sessionStorage.getItem('access_token') ??
-    window.sessionStorage.getItem('accessToken') ??
-    window.sessionStorage.getItem('jwt') ??
-    window.sessionStorage.getItem('token')
-  )
-}
-
-async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const token = getAuthToken()
-  const headers = new Headers(init.headers)
-
-  headers.set('Accept', 'application/json')
-  if (!(init.body instanceof FormData)) {
-    headers.set('Content-Type', 'application/json')
-  }
-  if (token) headers.set('Authorization', `Bearer ${token}`)
-
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...init,
-    headers,
-  })
-
-  if (!response.ok) {
-    const errorText = await response.text().catch(() => '')
-    throw new Error(`Atendimento API ${response.status}: ${errorText || response.statusText}`)
-  }
-
-  return response.json() as Promise<T>
-}
 
 function normalizeArrayResponse<T>(response: T[] | PaginatedResponse<T>): T[] {
   return Array.isArray(response) ? response : response.results ?? []
@@ -207,22 +165,22 @@ function normalizeMessage(message: MessageApi, ticketId: string): Message {
 }
 
 export async function getAtendimentoConversations(options: RequestOptions = {}): Promise<Conversation[]> {
-  const response = await apiFetch<TicketApi[] | PaginatedResponse<TicketApi>>('/helpdesk/tickets/', {
+  const { data } = await apiClient.get<TicketApi[] | PaginatedResponse<TicketApi>>('/helpdesk/tickets/', {
     signal: options.signal,
   })
 
-  return normalizeArrayResponse(response).map(normalizeTicket)
+  return normalizeArrayResponse(data).map(normalizeTicket)
 }
 
 export async function getAtendimentoConversation(
   conversationId: string,
   options: RequestOptions = {}
 ): Promise<Conversation> {
-  const ticket = await apiFetch<TicketApi>(`/helpdesk/tickets/${conversationId}/`, {
+  const { data } = await apiClient.get<TicketApi>(`/helpdesk/tickets/${conversationId}/`, {
     signal: options.signal,
   })
 
-  return normalizeTicket(ticket)
+  return normalizeTicket(data)
 }
 
 export async function getConversationMessages(
@@ -230,12 +188,12 @@ export async function getConversationMessages(
   options: RequestOptions = {}
 ): Promise<Message[]> {
   const params = new URLSearchParams({ ticket_id: conversationId, limit: '100' })
-  const response = await apiFetch<MessageApi[] | PaginatedResponse<MessageApi>>(
+  const { data } = await apiClient.get<MessageApi[] | PaginatedResponse<MessageApi>>(
     `/helpdesk/messages/?${params.toString()}`,
     { signal: options.signal }
   )
 
-  return normalizeArrayResponse(response).map((message) => normalizeMessage(message, conversationId))
+  return normalizeArrayResponse(data).map((message) => normalizeMessage(message, conversationId))
 }
 
 export async function getCustomerProfile(
@@ -243,7 +201,7 @@ export async function getCustomerProfile(
   options: RequestOptions = {}
 ): Promise<CustomerProfile | null> {
   try {
-    const customer = await apiFetch<{
+    const { data: customer } = await apiClient.get<{
       id: string
       name?: string
       email?: string
@@ -273,7 +231,7 @@ export async function getSLAInfo(
   conversationId: string,
   options: RequestOptions = {}
 ): Promise<SLAInfo | null> {
-  const ticket = await apiFetch<TicketApi>(`/helpdesk/tickets/${conversationId}/`, {
+  const { data: ticket } = await apiClient.get<TicketApi>(`/helpdesk/tickets/${conversationId}/`, {
     signal: options.signal,
   })
 
@@ -296,21 +254,19 @@ export async function sendMessage(
   correlationId?: string,
   options: RequestOptions = {}
 ): Promise<Message> {
-  const message = await apiFetch<MessageApi>('/helpdesk/messages/', {
-    method: 'POST',
+  const { data: message } = await apiClient.post<MessageApi>('/helpdesk/messages/', {
+    ticket_id: conversationId,
+    sender_type: 'agent',
+    direction: 'outbound',
+    content,
+    is_internal: isInternal,
+    external_message_id: correlationId,
+    metadata: {
+      correlation_id: correlationId,
+      delivery_status: 'sent',
+    },
+  }, {
     signal: options.signal,
-    body: JSON.stringify({
-      ticket_id: conversationId,
-      sender_type: 'agent',
-      direction: 'outbound',
-      content,
-      is_internal: isInternal,
-      external_message_id: correlationId,
-      metadata: {
-        correlation_id: correlationId,
-        delivery_status: 'sent',
-      },
-    }),
   })
 
   return normalizeMessage(message, conversationId)

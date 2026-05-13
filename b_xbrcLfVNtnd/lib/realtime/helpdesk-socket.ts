@@ -1,4 +1,7 @@
+'use client'
+
 import { dispatchHelpdeskSocketEvent } from '@/lib/realtime/event-dispatcher'
+import { useAuthStore } from '@/stores/useAuthStore'
 
 export type HelpdeskConnectionState =
   | 'connecting'
@@ -35,23 +38,12 @@ function devLog(title: string, data?: unknown) {
   console.groupEnd()
 }
 
-function getBrowserStorageValue(keys: string[]): string | null {
-  if (typeof window === 'undefined') return null
-
-  for (const key of keys) {
-    const value = window.localStorage.getItem(key) || window.sessionStorage.getItem(key)
-    if (value) return value
-  }
-
-  return null
-}
-
 function resolveToken(token?: string | null): string | null {
-  return token ?? getBrowserStorageValue(['access_token', 'accessToken', 'jwt', 'token', 'authToken'])
+  return token ?? useAuthStore.getState().accessToken
 }
 
 function resolveOrgId(orgId?: string | null): string | null {
-  return orgId ?? getBrowserStorageValue(['org_id', 'orgId', 'organization_id', 'organizationId'])
+  return orgId ?? useAuthStore.getState().user?.organizationId ?? null
 }
 
 function buildSocketUrl(baseUrl: string, token: string | null): string {
@@ -112,6 +104,12 @@ class HelpdeskSocketManager {
       heartbeatTimeoutMs: options.heartbeatTimeoutMs ?? this.options.heartbeatTimeoutMs,
     }
 
+    if (!this.options.token) {
+      this.setState('disconnected')
+      devLog('connect skipped: missing access token')
+      return
+    }
+
     if (
       this.socket &&
       (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING)
@@ -166,6 +164,23 @@ class HelpdeskSocketManager {
     this.reconnectAttempts = 0
     this.ensureConnected(this.options)
     this.requestResync(reason)
+  }
+
+  reconnectWithLatestAuth(reason: 'visibility' | 'manual' = 'manual') {
+    if (this.activeLeases === 0 && !this.socket) return
+    this.closeSocket({ reconnect: true })
+    this.reconnectAttempts = 0
+    this.ensureConnected({
+      ...this.options,
+      token: useAuthStore.getState().accessToken,
+      orgId: useAuthStore.getState().user?.organizationId ?? null,
+    })
+    this.requestResync(reason)
+  }
+
+  forceDisconnect() {
+    this.activeLeases = 0
+    this.closeSocket()
   }
 
   disconnect(config: { reconnect?: boolean } = {}) {
