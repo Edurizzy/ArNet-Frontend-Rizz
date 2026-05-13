@@ -8,6 +8,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Toggle } from '@/components/ui/toggle'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { useComposerStore, useActiveConversationStore } from '@/stores/atendimento-store'
+import { useMessageStore } from '@/stores/useMessageStore'
 import { sendMessage } from '@/services/atendimento-api'
 
 interface MessageComposerProps {
@@ -16,22 +17,60 @@ interface MessageComposerProps {
 
 export function MessageComposer({ conversationId }: MessageComposerProps) {
   const { content, isInternalNote, setContent, setInternalNote, reset } = useComposerStore()
-  const { addMessage, setSendingMessage, isSendingMessage } = useActiveConversationStore()
+  const setSendingMessage = useActiveConversationStore((state) => state.setSendingMessage)
+  const isSendingMessage = useActiveConversationStore((state) => state.isSendingMessage)
+  const addMessage = useMessageStore((state) => state.addMessage)
+  const replaceOptimisticMessage = useMessageStore((state) => state.replaceOptimisticMessage)
+  const markMessageFailed = useMessageStore((state) => state.markMessageFailed)
 
   const handleSend = useCallback(async () => {
     if (!content.trim() || isSendingMessage) return
 
+    const messageContent = content.trim()
+    const tempId = `tmp-${crypto.randomUUID()}`
+    const correlationId = crypto.randomUUID()
+
+    addMessage({
+      id: tempId,
+      conversationId,
+      type: 'agent',
+      content: messageContent,
+      timestamp: new Date(),
+      senderName: 'Joana',
+      senderId: 'user-001',
+      isInternal: isInternalNote,
+      metadata: {
+        deliveryStatus: 'sending',
+        delivery_status: 'sending',
+        correlationId,
+        correlation_id: correlationId,
+        optimisticId: tempId,
+        optimistic_id: tempId,
+      },
+    })
+    reset()
     setSendingMessage(true)
+
     try {
-      const newMessage = await sendMessage(conversationId, content, isInternalNote)
-      addMessage(newMessage)
-      reset()
+      const newMessage = await sendMessage(conversationId, messageContent, isInternalNote, correlationId)
+      replaceOptimisticMessage(correlationId, newMessage)
     } catch (error) {
       console.error('Failed to send message:', error)
+      markMessageFailed(tempId, error instanceof Error ? error.message : 'Falha ao enviar')
     } finally {
       setSendingMessage(false)
     }
-  }, [content, isInternalNote, conversationId, isSendingMessage, setSendingMessage, addMessage, reset])
+  }, [
+    content,
+    isInternalNote,
+    conversationId,
+    isSendingMessage,
+    setSendingMessage,
+    addMessage,
+    replaceOptimisticMessage,
+    markMessageFailed,
+    reset,
+  ])
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {

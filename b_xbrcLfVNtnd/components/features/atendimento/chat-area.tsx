@@ -1,19 +1,25 @@
 'use client'
 
-import { useEffect, useRef } from 'react'
-import { MessageSquare } from 'lucide-react'
-import { ScrollArea } from '@/components/ui/scroll-area'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { MessageSquare, RefreshCw, Wifi, WifiOff } from 'lucide-react'
+import { useShallow } from 'zustand/react/shallow'
+import { cn } from '@/lib/utils'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ConversationHeader } from './conversation-header'
 import { MessageBubble } from './message-bubble'
 import { HandoffEvent } from './handoff-event'
 import { MessageComposer } from './message-composer'
 import { useActiveConversationStore } from '@/stores/atendimento-store'
+import { useHelpdeskSocket } from '@/hooks/useHelpdeskSocket'
+import { useMessageStore } from '@/stores/useMessageStore'
 import {
   getConversationMessages,
   getCustomerProfile,
   getSLAInfo,
   mockAtendimentoConversations,
+  sendMessage,
 } from '@/services/atendimento-api'
 import type { SLAInfo } from '@/types/atendimento'
 import { useState } from 'react'
@@ -76,24 +82,36 @@ function EmptyState() {
 }
 
 export function ChatArea() {
-  const messagesEndRef = useRef<HTMLDivElement>(null)
+  const scrollContainerRef = useRef<HTMLDivElement>(null)
+  const shouldStickToBottomRef = useRef(true)
   const [slaInfo, setSlaInfo] = useState<SLAInfo | null>(null)
+  const { connectionState, isConnected, reconnect } = useHelpdeskSocket()
   
-  const {
-    selectedConversationId,
-    conversation,
-    messages,
-    isLoadingMessages,
-    setConversation,
-    setMessages,
-    setCustomerProfile,
-    setLoadingMessages,
-    setLoadingProfile,
-  } = useActiveConversationStore()
+  const selectedConversationId = useActiveConversationStore((state) => state.selectedConversationId)
+  const conversation = useActiveConversationStore((state) => state.conversation)
+  const isLoadingMessages = useActiveConversationStore((state) => state.isLoadingMessages)
+  const setConversation = useActiveConversationStore((state) => state.setConversation)
+  const setCustomerProfile = useActiveConversationStore((state) => state.setCustomerProfile)
+  const setLoadingMessages = useActiveConversationStore((state) => state.setLoadingMessages)
+  const setLoadingProfile = useActiveConversationStore((state) => state.setLoadingProfile)
+  const setSendingMessage = useActiveConversationStore((state) => state.setSendingMessage)
+  const hydrateMessages = useMessageStore((state) => state.hydrateMessages)
+  const addMessage = useMessageStore((state) => state.addMessage)
+  const replaceOptimisticMessage = useMessageStore((state) => state.replaceOptimisticMessage)
+  const markMessageFailed = useMessageStore((state) => state.markMessageFailed)
+  const messages = useMessageStore(
+    useShallow((state) => {
+      if (!selectedConversationId) return []
+      return (state.messagesByTicketId[selectedConversationId] ?? [])
+        .map((id) => state.messagesById[id])
+        .filter(Boolean)
+    })
+  )
 
   // Load conversation data when selection changes
   useEffect(() => {
     if (!selectedConversationId) return
+    const abortController = new AbortController()
 
     const loadConversationData = async () => {
       setLoadingMessages(true)
@@ -110,32 +128,91 @@ export function ChatArea() {
 
         // Load messages
         const messagesData = await getConversationMessages(selectedConversationId)
-        setMessages(messagesData)
+        if (abortController.signal.aborted) return
+        hydrateMessages(selectedConversationId, messagesData)
 
         // Load customer profile
         if (conv?.customerId) {
           const profile = await getCustomerProfile(conv.customerId)
+          if (abortController.signal.aborted) return
           setCustomerProfile(profile)
         }
 
         // Load SLA
         const sla = await getSLAInfo(selectedConversationId)
+        if (abortController.signal.aborted) return
         setSlaInfo(sla)
       } catch (error) {
         console.error('Failed to load conversation data:', error)
       } finally {
+        if (abortController.signal.aborted) return
         setLoadingMessages(false)
         setLoadingProfile(false)
       }
     }
 
     loadConversationData()
-  }, [selectedConversationId, setConversation, setMessages, setCustomerProfile, setLoadingMessages, setLoadingProfile])
+    return () => abortController.abort()
+  }, [selectedConversationId, setConversation, hydrateMessages, setCustomerProfile, setLoadingMessages, setLoadingProfile])
 
-  // Auto-scroll to bottom when messages change
+  const connectionTone = useMemo(() => {
+    if (isConnected) return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+    if (connectionState === 'connecting' || connectionState === 'reconnecting') {
+      return 'border-amber-500/30 bg-amber-500/10 text-amber-300'
+    }
+    return 'border-red-500/30 bg-red-500/10 text-red-300'
+  }, [connectionState, isConnected])
+
+  const handleScroll = useCallback(() => {
+    const element = scrollContainerRef.current
+    if (!element) return
+
+    const distanceFromBottom = element.scrollHeight - element.scrollTop - element.clientHeight
+    shouldStickToBottomRef.current = distanceFromBottom < 96
+  }, [])
+
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = 'smooth') => {
+    const element = scrollContainerRef.current
+    if (!element) return
+    element.scrollTo({ top: element.scrollHeight, behavior })
+  }, [])
+
+  // Auto-scroll only when the operator is already near the latest message.
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+    if (shouldStickToBottomRef.current) scrollToBottom('smooth')
+  }, [messages.length, scrollToBottom])
+
+  const handleRetryMessage = useCallback(async (messageId: string) => {
+    const failedMessage = useMessageStore.getState().messagesById[messageId]
+    if (!failedMessage) return
+
+    const correlationId = `retry-${crypto.randomUUID()}`
+    addMessage({
+      ...failedMessage,
+      metadata: {
+        ...failedMessage.metadata,
+        deliveryStatus: 'sending',
+        delivery_status: 'sending',
+        correlationId,
+        correlation_id: correlationId,
+      },
+    })
+
+    setSendingMessage(true)
+    try {
+      const confirmedMessage = await sendMessage(
+        failedMessage.conversationId,
+        failedMessage.content,
+        Boolean(failedMessage.isInternal),
+        correlationId
+      )
+      replaceOptimisticMessage(correlationId, confirmedMessage)
+    } catch (error) {
+      markMessageFailed(messageId, error instanceof Error ? error.message : 'Falha ao reenviar')
+    } finally {
+      setSendingMessage(false)
+    }
+  }, [addMessage, markMessageFailed, replaceOptimisticMessage, setSendingMessage])
 
   if (!selectedConversationId) {
     return <EmptyState />
@@ -148,22 +225,59 @@ export function ChatArea() {
   return (
     <div className="flex h-full flex-col">
       {/* Conversation Header */}
-      {conversation && (
-        <ConversationHeader conversation={conversation} slaInfo={slaInfo} />
-      )}
+      <div className="border-b border-zinc-800/30">
+        <div className="flex items-center justify-between gap-3 pr-4">
+          <div className="min-w-0 flex-1">
+            {conversation && (
+              <ConversationHeader conversation={conversation} slaInfo={slaInfo} />
+            )}
+          </div>
+          <Badge variant="outline" className={cn('gap-1.5 whitespace-nowrap text-[10px]', connectionTone)}>
+            {isConnected ? <Wifi className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}
+            {connectionState}
+          </Badge>
+          {!isConnected && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={reconnect}
+              className="h-7 gap-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+            >
+              <RefreshCw className="h-3 w-3" />
+              Reconectar
+            </Button>
+          )}
+        </div>
+      </div>
 
       {/* Messages */}
-      <ScrollArea className="flex-1">
+      <div
+        ref={scrollContainerRef}
+        onScroll={handleScroll}
+        className="flex-1 overflow-y-auto"
+      >
         <div className="space-y-4 p-4">
+          {messages.length === 0 && (
+            <div className="flex h-40 flex-col items-center justify-center rounded-xl border border-dashed border-zinc-800/70 bg-zinc-900/20 text-center">
+              <MessageSquare className="mb-2 h-6 w-6 text-zinc-600" />
+              <p className="text-sm text-zinc-500">Nenhuma mensagem ainda</p>
+              <p className="mt-1 text-xs text-zinc-700">Envie a primeira resposta para iniciar o atendimento.</p>
+            </div>
+          )}
           {messages.map((message) => {
             if (message.type === 'system') {
               return <HandoffEvent key={message.id} message={message} />
             }
-            return <MessageBubble key={message.id} message={message} />
+            return (
+              <MessageBubble
+                key={message.id}
+                message={message}
+                onRetry={handleRetryMessage}
+              />
+            )
           })}
-          <div ref={messagesEndRef} />
         </div>
-      </ScrollArea>
+      </div>
 
       {/* Message Composer */}
       <MessageComposer conversationId={selectedConversationId} />

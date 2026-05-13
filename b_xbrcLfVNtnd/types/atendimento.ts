@@ -20,6 +20,12 @@ export interface MessageMetadata {
   handoffFrom?: string
   handoffTo?: string
   deliveryStatus?: 'sending' | 'sent' | 'delivered' | 'read' | 'failed'
+  delivery_status?: 'sending' | 'sent' | 'delivered' | 'read' | 'failed'
+  correlationId?: string
+  correlation_id?: string
+  optimisticId?: string
+  optimistic_id?: string
+  error?: string
 }
 
 export interface CustomerProfile {

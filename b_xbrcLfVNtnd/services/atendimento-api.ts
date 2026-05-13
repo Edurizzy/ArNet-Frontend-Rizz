@@ -304,7 +304,8 @@ export async function getSLAInfo(conversationId: string): Promise<SLAInfo | null
 export async function sendMessage(
   conversationId: string, 
   content: string, 
-  isInternal: boolean
+  isInternal: boolean,
+  correlationId?: string
 ): Promise<Message> {
   await delay(300)
   return {
@@ -318,6 +319,9 @@ export async function sendMessage(
     isInternal,
     metadata: {
       deliveryStatus: 'sent',
+      delivery_status: 'sent',
+      correlationId,
+      correlation_id: correlationId,
     },
   }
 }

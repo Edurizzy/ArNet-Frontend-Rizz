@@ -1,5 +1,6 @@
 'use client'
 
+import { memo } from 'react'
 import { MessageSquare, Mail, Phone, Globe } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
@@ -52,18 +53,20 @@ function getTimeAgo(date: Date): string {
   return `${Math.floor(hours / 24)}d`
 }
 
-export function TicketCard({ conversation, isSelected, onClick }: TicketCardProps) {
+function TicketCardComponent({ conversation, isSelected, onClick }: TicketCardProps) {
   const initials = getInitials(conversation.customerName)
   const timeAgo = getTimeAgo(conversation.updatedAt)
+  const hasUnread = conversation.unreadCount > 0
 
   return (
     <button
       onClick={onClick}
       className={cn(
-        "group relative w-full rounded-lg p-3 text-left transition-colors",
+        "group relative w-full rounded-lg p-3 text-left transition-all duration-200",
         isSelected
           ? "bg-zinc-800/60"
-          : "hover:bg-zinc-800/30"
+          : "hover:bg-zinc-800/30",
+        hasUnread && !isSelected && "bg-emerald-500/5 ring-1 ring-emerald-500/15"
       )}
     >
       {/* Selected indicator */}
@@ -89,16 +92,22 @@ export function TicketCard({ conversation, isSelected, onClick }: TicketCardProp
         <div className="min-w-0 flex-1">
           {/* Header row */}
           <div className="flex items-center justify-between gap-2">
-            <span className="truncate text-sm font-medium text-zinc-200">
+            <span className={cn(
+              "truncate text-sm font-medium text-zinc-200",
+              hasUnread && "text-emerald-100"
+            )}>
               {conversation.customerName}
             </span>
-            <span className="flex-shrink-0 text-[10px] text-zinc-600">
+            <span className="shrink-0 text-[10px] text-zinc-600">
               {timeAgo}
             </span>
           </div>
 
           {/* Last message */}
-          <p className="mt-0.5 truncate text-xs text-zinc-500">
+          <p className={cn(
+            "mt-0.5 truncate text-xs text-zinc-500",
+            hasUnread && "font-medium text-zinc-300"
+          )}>
             {conversation.lastMessage}
           </p>
 
@@ -115,8 +124,8 @@ export function TicketCard({ conversation, isSelected, onClick }: TicketCardProp
             </Badge>
 
             {/* Unread badge */}
-            {conversation.unreadCount > 0 && (
-              <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-emerald-500 px-1.5 text-[10px] font-medium text-white">
+            {hasUnread && (
+              <span className="flex h-5 min-w-5 animate-pulse items-center justify-center rounded-full bg-emerald-500 px-1.5 text-[10px] font-medium text-white shadow-lg shadow-emerald-500/20">
                 {conversation.unreadCount}
               </span>
             )}
@@ -126,3 +135,5 @@ export function TicketCard({ conversation, isSelected, onClick }: TicketCardProp
     </button>
   )
 }
+
+export const TicketCard = memo(TicketCardComponent)

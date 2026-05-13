@@ -1,8 +1,9 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { Search, ChevronDown } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { useShallow } from 'zustand/react/shallow'
 import { cn } from '@/lib/utils'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
@@ -17,6 +18,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { TicketCard } from './ticket-card'
 import { getAtendimentoConversations } from '@/services/atendimento-api'
 import { useTicketQueueUIStore, useActiveConversationStore } from '@/stores/atendimento-store'
+import { useTicketStore } from '@/stores/useTicketStore'
 import type { Conversation } from '@/types/domain'
 import type { TicketStatusFilter } from '@/types/atendimento'
 
@@ -47,27 +49,38 @@ function TicketQueueSkeleton() {
 }
 
 export function TicketQueue() {
-  const [conversations, setConversations] = useState<Conversation[]>([])
   const [isLoading, setIsLoading] = useState(true)
-  const { filters, setFilters } = useTicketQueueUIStore()
-  const { selectedConversationId, selectConversation } = useActiveConversationStore()
+  const filters = useTicketQueueUIStore((state) => state.filters)
+  const setFilters = useTicketQueueUIStore((state) => state.setFilters)
+  const selectedConversationId = useActiveConversationStore((state) => state.selectedConversationId)
+  const selectConversation = useActiveConversationStore((state) => state.selectConversation)
+  const hydrateTickets = useTicketStore((state) => state.hydrateTickets)
+  const clearUnread = useTicketStore((state) => state.clearUnread)
+  const conversations = useTicketStore(
+    useShallow((state) => state.queueIds.map((id) => state.ticketsById[id]).filter(Boolean))
+  )
 
   useEffect(() => {
+    const abortController = new AbortController()
+
     const loadConversations = async () => {
       setIsLoading(true)
       try {
         const data = await getAtendimentoConversations()
-        setConversations(data)
+        if (abortController.signal.aborted) return
+        hydrateTickets(data)
       } catch (error) {
         console.error('Failed to load conversations:', error)
       } finally {
+        if (abortController.signal.aborted) return
         setIsLoading(false)
       }
     }
     loadConversations()
-  }, [])
+    return () => abortController.abort()
+  }, [hydrateTickets])
 
-  const filteredConversations = conversations.filter((conv) => {
+  const filteredConversations = useMemo(() => conversations.filter((conv) => {
     // Search filter
     if (filters.searchQuery) {
       const query = filters.searchQuery.toLowerCase()
@@ -92,11 +105,12 @@ export function TicketQueue() {
     }
 
     return true
-  })
+  }), [conversations, filters.searchQuery, filters.status])
 
   const handleSelectConversation = useCallback((id: string) => {
     selectConversation(id)
-  }, [selectConversation])
+    clearUnread(id)
+  }, [clearUnread, selectConversation])
 
   const currentFilterLabel = statusFilterOptions.find(
     (opt) => opt.value === filters.status
@@ -165,7 +179,7 @@ export function TicketQueue() {
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, scale: 0.95 }}
-                  transition={{ duration: 0.15 }}
+                  transition={{ duration: 0.18, ease: 'easeOut' }}
                 >
                   <TicketCard
                     conversation={conversation}
