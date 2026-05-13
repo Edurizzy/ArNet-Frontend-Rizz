@@ -8,6 +8,7 @@ export type HelpdeskConnectionState =
   | 'failed'
 
 type ConnectionListener = (state: HelpdeskConnectionState) => void
+type ResyncListener = (reason: 'visibility' | 'reconnect' | 'manual') => void
 
 export interface HelpdeskSocketOptions {
   url?: string
@@ -22,6 +23,8 @@ const DEFAULT_SOCKET_URL = 'ws://127.0.0.1:8000/ws/v1/helpdesk/'
 const DEFAULT_MAX_RETRIES = 8
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 25_000
 const DEFAULT_HEARTBEAT_TIMEOUT_MS = 60_000
+const STRICT_MODE_DISCONNECT_GRACE_MS = 1_000
+const RESYNC_DEBOUNCE_MS = 750
 
 const isDevelopment = process.env.NODE_ENV !== 'production'
 
@@ -63,6 +66,7 @@ class HelpdeskSocketManager {
   private socket: WebSocket | null = null
   private state: HelpdeskConnectionState = 'disconnected'
   private listeners = new Set<ConnectionListener>()
+  private resyncListeners = new Set<ResyncListener>()
   private options: Required<Omit<HelpdeskSocketOptions, 'token' | 'orgId'>> & {
     token: string | null
     orgId: string | null
@@ -77,7 +81,12 @@ class HelpdeskSocketManager {
   private reconnectAttempts = 0
   private reconnectTimer: number | null = null
   private heartbeatTimer: number | null = null
+  private disconnectTimer: number | null = null
+  private resyncTimer: number | null = null
   private lastMessageAt = 0
+  private lastPongAt = 0
+  private activeLeases = 0
+  private hasVisibilityListener = false
   private intentionalDisconnect = false
 
   getConnectionState() {
@@ -87,6 +96,13 @@ class HelpdeskSocketManager {
   connect(options: HelpdeskSocketOptions = {}) {
     if (typeof window === 'undefined') return
 
+    this.activeLeases += 1
+    this.clearDisconnectTimer()
+    this.ensureVisibilityListener()
+    this.ensureConnected(options)
+  }
+
+  private ensureConnected(options: HelpdeskSocketOptions = {}) {
     this.options = {
       url: options.url ?? this.options.url,
       token: resolveToken(options.token),
@@ -115,8 +131,10 @@ class HelpdeskSocketManager {
     this.socket.onopen = () => {
       this.reconnectAttempts = 0
       this.lastMessageAt = Date.now()
+      this.lastPongAt = Date.now()
       this.setState('connected')
       this.startHeartbeat()
+      this.requestResync('reconnect')
       devLog('connected', { url: this.options.url, orgId: this.options.orgId })
     }
 
@@ -143,13 +161,30 @@ class HelpdeskSocketManager {
     }
   }
 
-  reconnect() {
-    this.disconnect({ reconnect: true })
+  reconnect(reason: 'visibility' | 'manual' = 'manual') {
+    this.closeSocket({ reconnect: true })
     this.reconnectAttempts = 0
-    this.connect(this.options)
+    this.ensureConnected(this.options)
+    this.requestResync(reason)
   }
 
   disconnect(config: { reconnect?: boolean } = {}) {
+    this.activeLeases = Math.max(0, this.activeLeases - 1)
+    if (config.reconnect) {
+      this.closeSocket(config)
+      return
+    }
+
+    if (this.activeLeases > 0) return
+
+    this.clearDisconnectTimer()
+    this.disconnectTimer = window.setTimeout(() => {
+      if (this.activeLeases > 0) return
+      this.closeSocket()
+    }, STRICT_MODE_DISCONNECT_GRACE_MS)
+  }
+
+  private closeSocket(config: { reconnect?: boolean } = {}) {
     this.intentionalDisconnect = !config.reconnect
     this.clearReconnectTimer()
     this.stopHeartbeat()
@@ -190,12 +225,25 @@ class HelpdeskSocketManager {
     this.listeners.delete(listener)
   }
 
+  subscribeResync(listener: ResyncListener) {
+    this.resyncListeners.add(listener)
+    return () => {
+      this.resyncListeners.delete(listener)
+    }
+  }
+
+  isStale() {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return true
+    return Date.now() - this.lastMessageAt > this.options.heartbeatTimeoutMs
+  }
+
   private handleMessage(raw: unknown) {
     if (typeof raw !== 'string') return
 
     try {
       const payload = JSON.parse(raw) as unknown
       if (this.isHeartbeatPayload(payload)) {
+        this.lastPongAt = Date.now()
         if (this.isPingPayload(payload)) this.send({ type: 'pong' })
         return
       }
@@ -242,6 +290,9 @@ class HelpdeskSocketManager {
   }
 
   private scheduleReconnect() {
+    this.clearReconnectTimer()
+    if (this.intentionalDisconnect || this.activeLeases === 0) return
+
     if (this.reconnectAttempts >= this.options.maxRetries) {
       this.setState('failed')
       devLog('reconnect failed: max retries reached', { attempts: this.reconnectAttempts })
@@ -256,13 +307,67 @@ class HelpdeskSocketManager {
     const delayMs = exponentialDelay + jitter
 
     devLog('reconnect scheduled', { attempt: this.reconnectAttempts, delayMs })
-    this.reconnectTimer = window.setTimeout(() => this.connect(this.options), delayMs)
+    this.reconnectTimer = window.setTimeout(() => this.ensureConnected(this.options), delayMs)
   }
 
   private clearReconnectTimer() {
     if (!this.reconnectTimer) return
     window.clearTimeout(this.reconnectTimer)
     this.reconnectTimer = null
+  }
+
+  private clearDisconnectTimer() {
+    if (!this.disconnectTimer) return
+    window.clearTimeout(this.disconnectTimer)
+    this.disconnectTimer = null
+  }
+
+  private ensureVisibilityListener() {
+    if (this.hasVisibilityListener || typeof document === 'undefined') return
+
+    document.addEventListener('visibilitychange', this.handleVisibilityChange)
+    window.addEventListener('online', this.handleOnline)
+    window.addEventListener('offline', this.handleOffline)
+    this.hasVisibilityListener = true
+  }
+
+  private handleVisibilityChange = () => {
+    if (document.visibilityState !== 'visible') return
+    if (this.activeLeases === 0) return
+
+    const stale = this.isStale()
+    devLog(stale ? 'visible tab found stale socket' : 'visible tab socket healthy', {
+      state: this.state,
+      ageMs: Date.now() - this.lastMessageAt,
+      lastPongAgeMs: Date.now() - this.lastPongAt,
+    })
+
+    if (stale || this.state === 'disconnected' || this.state === 'failed') {
+      this.reconnect('visibility')
+      return
+    }
+
+    this.requestResync('visibility')
+  }
+
+  private handleOnline = () => {
+    devLog('browser online; validating socket')
+    if (this.activeLeases > 0) this.reconnect('visibility')
+  }
+
+  private handleOffline = () => {
+    devLog('browser offline')
+    this.setState('disconnected')
+  }
+
+  private requestResync(reason: 'visibility' | 'reconnect' | 'manual') {
+    if (this.resyncTimer) return
+
+    this.resyncTimer = window.setTimeout(() => {
+      this.resyncTimer = null
+      devLog('resync requested', { reason, listeners: this.resyncListeners.size })
+      this.resyncListeners.forEach((listener) => listener(reason))
+    }, RESYNC_DEBOUNCE_MS)
   }
 
   private setState(nextState: HelpdeskConnectionState) {

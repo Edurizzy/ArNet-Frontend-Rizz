@@ -47,13 +47,13 @@ export function ChartSkeleton({ className, showLegend = true }: ChartSkeletonPro
       
       {/* Chart area skeleton */}
       <div className="flex h-[200px] items-end gap-2 px-4">
-        {Array.from({ length: 12 }).map((_, i) => (
-          <div
-            key={i}
-            className="flex-1 rounded-t bg-zinc-800/30"
-            style={{ height: `${20 + Math.random() * 60}%` }}
-          />
-        ))}
+          {[35, 60, 25, 45, 80, 55, 30, 70, 40, 65, 50, 85].map((height, i) => (
+            <div
+              key={i}
+              className="flex-1 rounded-t bg-zinc-800/30"
+              style={{ height: `${height}%` }}
+            />
+          ))}
       </div>
       
       {/* Legend skeleton */}

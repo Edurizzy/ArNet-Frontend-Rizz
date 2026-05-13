@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, useCallback, useMemo } from 'react'
-import { Search, ChevronDown } from 'lucide-react'
+import { Search, ChevronDown, RefreshCw, Wifi, WifiOff } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useShallow } from 'zustand/react/shallow'
 import { cn } from '@/lib/utils'
@@ -19,7 +19,7 @@ import { TicketCard } from './ticket-card'
 import { getAtendimentoConversations } from '@/services/atendimento-api'
 import { useTicketQueueUIStore, useActiveConversationStore } from '@/stores/atendimento-store'
 import { useTicketStore } from '@/stores/useTicketStore'
-import type { Conversation } from '@/types/domain'
+import { useHelpdeskSocket } from '@/hooks/useHelpdeskSocket'
 import type { TicketStatusFilter } from '@/types/atendimento'
 
 const statusFilterOptions: { value: TicketStatusFilter; label: string }[] = [
@@ -50,6 +50,7 @@ function TicketQueueSkeleton() {
 
 export function TicketQueue() {
   const [isLoading, setIsLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const filters = useTicketQueueUIStore((state) => state.filters)
   const setFilters = useTicketQueueUIStore((state) => state.setFilters)
   const selectedConversationId = useActiveConversationStore((state) => state.selectedConversationId)
@@ -60,25 +61,36 @@ export function TicketQueue() {
     useShallow((state) => state.queueIds.map((id) => state.ticketsById[id]).filter(Boolean))
   )
 
+  const loadConversations = useCallback(async (signal?: AbortSignal) => {
+    setIsLoading(true)
+    setLoadError(null)
+    try {
+      const data = await getAtendimentoConversations({ signal })
+      if (signal?.aborted) return
+      hydrateTickets(data)
+    } catch (error) {
+      if (signal?.aborted) return
+      setLoadError(error instanceof Error ? error.message : 'Falha ao carregar fila')
+      console.error('Failed to load conversations:', error)
+    } finally {
+      if (signal?.aborted) return
+      setIsLoading(false)
+    }
+  }, [hydrateTickets])
+
+  const handleSocketResync = useCallback(() => {
+    void loadConversations()
+  }, [loadConversations])
+
+  const { connectionState, isConnected, reconnect } = useHelpdeskSocket({
+    onResync: handleSocketResync,
+  })
+
   useEffect(() => {
     const abortController = new AbortController()
-
-    const loadConversations = async () => {
-      setIsLoading(true)
-      try {
-        const data = await getAtendimentoConversations()
-        if (abortController.signal.aborted) return
-        hydrateTickets(data)
-      } catch (error) {
-        console.error('Failed to load conversations:', error)
-      } finally {
-        if (abortController.signal.aborted) return
-        setIsLoading(false)
-      }
-    }
-    loadConversations()
+    void loadConversations(abortController.signal)
     return () => abortController.abort()
-  }, [hydrateTickets])
+  }, [loadConversations])
 
   const filteredConversations = useMemo(() => conversations.filter((conv) => {
     // Search filter
@@ -115,6 +127,14 @@ export function TicketQueue() {
   const currentFilterLabel = statusFilterOptions.find(
     (opt) => opt.value === filters.status
   )?.label || 'Todos'
+
+  const connectionTone = useMemo(() => {
+    if (isConnected) return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+    if (connectionState === 'connecting' || connectionState === 'reconnecting') {
+      return 'border-amber-500/30 bg-amber-500/10 text-amber-300'
+    }
+    return 'border-red-500/30 bg-red-500/10 text-red-300'
+  }, [connectionState, isConnected])
 
   return (
     <div className="flex h-full flex-col">
@@ -160,8 +180,12 @@ export function TicketQueue() {
         </DropdownMenu>
 
         {/* Conversation count */}
-        <div className="text-xs text-zinc-600">
-          {filteredConversations.length} conversa{filteredConversations.length !== 1 ? 's' : ''}
+        <div className="flex items-center justify-between gap-2 text-xs text-zinc-600">
+          <span>{filteredConversations.length} conversa{filteredConversations.length !== 1 ? 's' : ''}</span>
+          <span className={cn('inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px]', connectionTone)}>
+            {isConnected ? <Wifi className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}
+            {connectionState}
+          </span>
         </div>
       </div>
 
@@ -169,6 +193,32 @@ export function TicketQueue() {
       <ScrollArea className="flex-1">
         {isLoading ? (
           <TicketQueueSkeleton />
+        ) : loadError ? (
+          <div className="flex h-48 flex-col items-center justify-center px-6 text-center">
+            <p className="text-sm text-red-300">Não foi possível carregar a fila</p>
+            <p className="mt-1 line-clamp-2 text-xs text-zinc-600">{loadError}</p>
+            <div className="mt-3 flex gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => void loadConversations()}
+                className="h-7 gap-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+              >
+                <RefreshCw className="h-3 w-3" />
+                Recarregar
+              </Button>
+              {!isConnected && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={reconnect}
+                  className="h-7 gap-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+                >
+                  Reconectar
+                </Button>
+              )}
+            </div>
+          </div>
         ) : filteredConversations.length > 0 ? (
           <div className="space-y-0.5 p-2">
             <AnimatePresence mode="popLayout">

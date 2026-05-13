@@ -25,6 +25,12 @@ export interface MessageMetadata {
   correlation_id?: string
   optimisticId?: string
   optimistic_id?: string
+  createdAt?: string
+  created_at?: string
+  updatedAt?: string
+  updated_at?: string
+  eventTimestamp?: string
+  event_timestamp?: string
   error?: string
 }
 

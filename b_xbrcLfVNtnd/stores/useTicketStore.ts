@@ -3,29 +3,120 @@
 import { create } from 'zustand'
 import type { Conversation } from '@/types/domain'
 
+type TicketPatch = Partial<Conversation> & {
+  id: string
+  eventTimestamp?: Date | string
+}
+
 interface TicketState {
   ticketsById: Record<string, Conversation>
   queueIds: string[]
   hydrateTickets: (tickets: Conversation[]) => void
-  updateTicket: (ticket: Partial<Conversation> & { id: string }) => void
+  updateTicket: (ticket: TicketPatch) => void
   markTicketUnread: (ticketId: string, incrementBy?: number) => void
   clearUnread: (ticketId: string) => void
+}
+
+const isDevelopment = process.env.NODE_ENV !== 'production'
+
+function devLog(title: string, data?: unknown) {
+  if (!isDevelopment) return
+  console.groupCollapsed(`[helpdesk:tickets] ${title}`)
+  if (data !== undefined) console.log(data)
+  console.groupEnd()
+}
+
+function toDate(value: Date | string | undefined): Date {
+  if (value instanceof Date) return value
+  if (typeof value === 'string') return new Date(value)
+  return new Date()
 }
 
 function normalizeTicket(ticket: Conversation): Conversation {
   return {
     ...ticket,
-    startedAt: ticket.startedAt instanceof Date ? ticket.startedAt : new Date(ticket.startedAt),
-    updatedAt: ticket.updatedAt instanceof Date ? ticket.updatedAt : new Date(ticket.updatedAt),
-    resolvedAt: ticket.resolvedAt
-      ? ticket.resolvedAt instanceof Date
-        ? ticket.resolvedAt
-        : new Date(ticket.resolvedAt)
-      : undefined,
+    startedAt: toDate(ticket.startedAt),
+    updatedAt: toDate(ticket.updatedAt),
+    resolvedAt: ticket.resolvedAt ? toDate(ticket.resolvedAt) : undefined,
   }
 }
 
+function createPlaceholderTicket(ticket: TicketPatch): Conversation {
+  const now = toDate(ticket.updatedAt ?? ticket.eventTimestamp)
+
+  return normalizeTicket({
+    id: ticket.id,
+    customerId: ticket.customerId ?? ticket.id,
+    customerName: ticket.customerName ?? 'Cliente',
+    channel: ticket.channel ?? 'whatsapp',
+    status: ticket.status ?? 'open',
+    priority: ticket.priority ?? 'medium',
+    assignedAgentId: ticket.assignedAgentId,
+    assignedAIAgentId: ticket.assignedAIAgentId,
+    subject: ticket.subject ?? 'Atendimento receptivo',
+    lastMessage: ticket.lastMessage,
+    unreadCount: ticket.unreadCount ?? 0,
+    sentiment: ticket.sentiment,
+    tags: ticket.tags ?? [],
+    startedAt: ticket.startedAt ?? now,
+    updatedAt: ticket.updatedAt ?? now,
+    resolvedAt: ticket.resolvedAt,
+  })
+}
+
+function getTicketTime(ticket: Conversation | TicketPatch) {
+  const eventTimestamp = 'eventTimestamp' in ticket ? ticket.eventTimestamp : undefined
+  return toDate(eventTimestamp ?? ticket.updatedAt).getTime()
+}
+
+function mergeTicket(
+  existingTicket: Conversation | undefined,
+  incomingTicket: TicketPatch,
+  source: 'hydration' | 'realtime'
+): Conversation {
+  if (!existingTicket) return createPlaceholderTicket(incomingTicket)
+
+  const existing = normalizeTicket(existingTicket)
+  const incomingTime = getTicketTime(incomingTicket)
+  const existingTime = getTicketTime(existing)
+  const isOlder = incomingTime < existingTime
+
+  if (isOlder) {
+    devLog('out-of-order ticket update ignored', {
+      id: incomingTicket.id,
+      incomingTime,
+      existingTime,
+      source,
+    })
+  }
+
+  if (isOlder) {
+    return normalizeTicket({
+      ...existing,
+      customerId: existing.customerId || incomingTicket.customerId || existing.id,
+      customerName: existing.customerName || incomingTicket.customerName || 'Cliente',
+      subject: existing.subject || incomingTicket.subject,
+      lastMessage: existing.lastMessage || incomingTicket.lastMessage,
+      tags: existing.tags.length > 0 ? existing.tags : incomingTicket.tags ?? [],
+    })
+  }
+
+  return normalizeTicket({
+    ...existing,
+    ...incomingTicket,
+    unreadCount:
+      source === 'hydration'
+        ? Math.max(existing.unreadCount, incomingTicket.unreadCount ?? 0)
+        : incomingTicket.unreadCount ?? existing.unreadCount,
+    tags: incomingTicket.tags ?? existing.tags,
+    startedAt: incomingTicket.startedAt ?? existing.startedAt,
+    updatedAt: toDate(incomingTicket.updatedAt ?? incomingTicket.eventTimestamp ?? existing.updatedAt),
+  })
+}
+
 function sortQueueIds(queueIds: string[], ticketsById: Record<string, Conversation>) {
+  const position = new Map(queueIds.map((id, index) => [id, index]))
+
   return [...queueIds].sort((leftId, rightId) => {
     const left = ticketsById[leftId]
     const right = ticketsById[rightId]
@@ -37,7 +128,7 @@ function sortQueueIds(queueIds: string[], ticketsById: Record<string, Conversati
     const updatedDelta = right.updatedAt.getTime() - left.updatedAt.getTime()
     if (updatedDelta !== 0) return updatedDelta
 
-    return queueIds.indexOf(leftId) - queueIds.indexOf(rightId)
+    return (position.get(leftId) ?? 0) - (position.get(rightId) ?? 0)
   })
 }
 
@@ -49,58 +140,88 @@ function addTicketId(queueIds: string[], ticketId: string) {
   return queueIds.includes(ticketId) ? queueIds : [...queueIds, ticketId]
 }
 
+function areTicketsEqual(left: Conversation, right: Conversation) {
+  return (
+    left.id === right.id &&
+    left.customerId === right.customerId &&
+    left.customerName === right.customerName &&
+    left.channel === right.channel &&
+    left.status === right.status &&
+    left.priority === right.priority &&
+    left.assignedAgentId === right.assignedAgentId &&
+    left.assignedAIAgentId === right.assignedAIAgentId &&
+    left.subject === right.subject &&
+    left.lastMessage === right.lastMessage &&
+    left.unreadCount === right.unreadCount &&
+    left.sentiment === right.sentiment &&
+    left.updatedAt.getTime() === right.updatedAt.getTime() &&
+    left.tags.length === right.tags.length &&
+    left.tags.every((tag, index) => tag === right.tags[index])
+  )
+}
+
+function commitTickets(
+  state: TicketState,
+  ticketsById: Record<string, Conversation>,
+  queueIds: string[]
+) {
+  const sortedQueueIds = sortQueueIds(queueIds, ticketsById)
+  const nextQueueIds = areIdsEqual(queueIds, sortedQueueIds) ? queueIds : sortedQueueIds
+
+  if (state.ticketsById === ticketsById && state.queueIds === nextQueueIds) return state
+
+  return {
+    ticketsById,
+    queueIds: nextQueueIds,
+  }
+}
+
 export const useTicketStore = create<TicketState>((set) => ({
   ticketsById: {},
   queueIds: [],
 
   hydrateTickets: (tickets) =>
     set((state) => {
-      const ticketsById = { ...state.ticketsById }
+      let ticketsById = state.ticketsById
       let queueIds = state.queueIds
+      let changed = false
 
       tickets.forEach((ticket) => {
         const normalizedTicket = normalizeTicket(ticket)
-        ticketsById[normalizedTicket.id] = {
-          ...ticketsById[normalizedTicket.id],
-          ...normalizedTicket,
-          unreadCount: ticketsById[normalizedTicket.id]?.unreadCount ?? normalizedTicket.unreadCount,
+        const nextTicket = mergeTicket(ticketsById[normalizedTicket.id], normalizedTicket, 'hydration')
+
+        if (!ticketsById[normalizedTicket.id] || !areTicketsEqual(ticketsById[normalizedTicket.id], nextTicket)) {
+          ticketsById = { ...ticketsById, [normalizedTicket.id]: nextTicket }
+          changed = true
         }
-        queueIds = addTicketId(queueIds, normalizedTicket.id)
+
+        const nextQueueIds = addTicketId(queueIds, normalizedTicket.id)
+        if (nextQueueIds !== queueIds) {
+          queueIds = nextQueueIds
+          changed = true
+        }
       })
 
-      const sortedQueueIds = sortQueueIds(queueIds, ticketsById)
-
-      return {
-        ticketsById,
-        queueIds: areIdsEqual(queueIds, sortedQueueIds) ? queueIds : sortedQueueIds,
-      }
+      if (!changed) return state
+      return commitTickets(state, ticketsById, queueIds)
     }),
 
   updateTicket: (ticket) =>
     set((state) => {
+      const nextTicket = mergeTicket(state.ticketsById[ticket.id], ticket, 'realtime')
       const existingTicket = state.ticketsById[ticket.id]
-      if (!existingTicket && !ticket.customerId) return state
+      const queueIds = addTicketId(state.queueIds, ticket.id)
 
-      const nextTicket = normalizeTicket({
-        ...(existingTicket as Conversation),
-        ...ticket,
-        unreadCount: ticket.unreadCount ?? existingTicket?.unreadCount ?? 0,
-        tags: ticket.tags ?? existingTicket?.tags ?? [],
-        startedAt: ticket.startedAt ?? existingTicket?.startedAt ?? new Date(),
-        updatedAt: ticket.updatedAt ?? existingTicket?.updatedAt ?? new Date(),
-      })
+      if (existingTicket && areTicketsEqual(existingTicket, nextTicket) && queueIds === state.queueIds) {
+        return state
+      }
 
       const ticketsById = {
         ...state.ticketsById,
         [ticket.id]: nextTicket,
       }
-      const queueIds = addTicketId(state.queueIds, ticket.id)
-      const sortedQueueIds = sortQueueIds(queueIds, ticketsById)
 
-      return {
-        ticketsById,
-        queueIds: areIdsEqual(queueIds, sortedQueueIds) ? queueIds : sortedQueueIds,
-      }
+      return commitTickets(state, ticketsById, queueIds)
     }),
 
   markTicketUnread: (ticketId, incrementBy = 1) =>
@@ -108,20 +229,17 @@ export const useTicketStore = create<TicketState>((set) => ({
       const ticket = state.ticketsById[ticketId]
       if (!ticket) return state
 
+      const nextTicket = {
+        ...ticket,
+        unreadCount: ticket.unreadCount + incrementBy,
+        updatedAt: new Date(),
+      }
       const ticketsById = {
         ...state.ticketsById,
-        [ticketId]: {
-          ...ticket,
-          unreadCount: ticket.unreadCount + incrementBy,
-          updatedAt: new Date(),
-        },
+        [ticketId]: nextTicket,
       }
-      const sortedQueueIds = sortQueueIds(state.queueIds, ticketsById)
 
-      return {
-        ticketsById,
-        queueIds: areIdsEqual(state.queueIds, sortedQueueIds) ? state.queueIds : sortedQueueIds,
-      }
+      return commitTickets(state, ticketsById, state.queueIds)
     }),
 
   clearUnread: (ticketId) =>
@@ -136,11 +254,7 @@ export const useTicketStore = create<TicketState>((set) => ({
           unreadCount: 0,
         },
       }
-      const sortedQueueIds = sortQueueIds(state.queueIds, ticketsById)
 
-      return {
-        ticketsById,
-        queueIds: areIdsEqual(state.queueIds, sortedQueueIds) ? state.queueIds : sortedQueueIds,
-      }
+      return commitTickets(state, ticketsById, state.queueIds)
     }),
 }))

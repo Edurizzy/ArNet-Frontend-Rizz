@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { MessageSquare, RefreshCw, Wifi, WifiOff } from 'lucide-react'
 import { useShallow } from 'zustand/react/shallow'
 import { cn } from '@/lib/utils'
@@ -14,15 +14,15 @@ import { MessageComposer } from './message-composer'
 import { useActiveConversationStore } from '@/stores/atendimento-store'
 import { useHelpdeskSocket } from '@/hooks/useHelpdeskSocket'
 import { useMessageStore } from '@/stores/useMessageStore'
+import { useTicketStore } from '@/stores/useTicketStore'
 import {
+  getAtendimentoConversation,
   getConversationMessages,
   getCustomerProfile,
   getSLAInfo,
-  mockAtendimentoConversations,
   sendMessage,
 } from '@/services/atendimento-api'
 import type { SLAInfo } from '@/types/atendimento'
-import { useState } from 'react'
 
 function ChatAreaSkeleton() {
   return (
@@ -85,7 +85,7 @@ export function ChatArea() {
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const shouldStickToBottomRef = useRef(true)
   const [slaInfo, setSlaInfo] = useState<SLAInfo | null>(null)
-  const { connectionState, isConnected, reconnect } = useHelpdeskSocket()
+  const [loadError, setLoadError] = useState<string | null>(null)
   
   const selectedConversationId = useActiveConversationStore((state) => state.selectedConversationId)
   const conversation = useActiveConversationStore((state) => state.conversation)
@@ -99,6 +99,7 @@ export function ChatArea() {
   const addMessage = useMessageStore((state) => state.addMessage)
   const replaceOptimisticMessage = useMessageStore((state) => state.replaceOptimisticMessage)
   const markMessageFailed = useMessageStore((state) => state.markMessageFailed)
+  const updateTicket = useTicketStore((state) => state.updateTicket)
   const messages = useMessageStore(
     useShallow((state) => {
       if (!selectedConversationId) return []
@@ -108,52 +109,61 @@ export function ChatArea() {
     })
   )
 
+  const loadConversationData = useCallback(async (conversationId: string, signal?: AbortSignal) => {
+    setLoadingMessages(true)
+    setLoadingProfile(true)
+    setLoadError(null)
+
+    try {
+      const [conversationData, messagesData, sla] = await Promise.all([
+        getAtendimentoConversation(conversationId, { signal }),
+        getConversationMessages(conversationId, { signal }),
+        getSLAInfo(conversationId, { signal }),
+      ])
+      if (signal?.aborted) return
+
+      setConversation(conversationData)
+      updateTicket(conversationData)
+      hydrateMessages(conversationId, messagesData)
+      setSlaInfo(sla)
+
+      const profile = await getCustomerProfile(conversationData.customerId, { signal })
+      if (signal?.aborted) return
+      setCustomerProfile(profile)
+    } catch (error) {
+      if (signal?.aborted) return
+      setLoadError(error instanceof Error ? error.message : 'Falha ao carregar conversa')
+      console.error('Failed to load conversation data:', error)
+    } finally {
+      if (signal?.aborted) return
+      setLoadingMessages(false)
+      setLoadingProfile(false)
+    }
+  }, [
+    hydrateMessages,
+    setConversation,
+    setCustomerProfile,
+    setLoadingMessages,
+    setLoadingProfile,
+    updateTicket,
+  ])
+
+  const handleSocketResync = useCallback(() => {
+    if (!selectedConversationId) return
+    void loadConversationData(selectedConversationId)
+  }, [loadConversationData, selectedConversationId])
+
+  const { connectionState, isConnected, reconnect } = useHelpdeskSocket({
+    onResync: handleSocketResync,
+  })
+
   // Load conversation data when selection changes
   useEffect(() => {
     if (!selectedConversationId) return
     const abortController = new AbortController()
-
-    const loadConversationData = async () => {
-      setLoadingMessages(true)
-      setLoadingProfile(true)
-
-      try {
-        // Find conversation from mock data
-        const conv = mockAtendimentoConversations.find(
-          (c) => c.id === selectedConversationId
-        )
-        if (conv) {
-          setConversation(conv)
-        }
-
-        // Load messages
-        const messagesData = await getConversationMessages(selectedConversationId)
-        if (abortController.signal.aborted) return
-        hydrateMessages(selectedConversationId, messagesData)
-
-        // Load customer profile
-        if (conv?.customerId) {
-          const profile = await getCustomerProfile(conv.customerId)
-          if (abortController.signal.aborted) return
-          setCustomerProfile(profile)
-        }
-
-        // Load SLA
-        const sla = await getSLAInfo(selectedConversationId)
-        if (abortController.signal.aborted) return
-        setSlaInfo(sla)
-      } catch (error) {
-        console.error('Failed to load conversation data:', error)
-      } finally {
-        if (abortController.signal.aborted) return
-        setLoadingMessages(false)
-        setLoadingProfile(false)
-      }
-    }
-
-    loadConversationData()
+    void loadConversationData(selectedConversationId, abortController.signal)
     return () => abortController.abort()
-  }, [selectedConversationId, setConversation, hydrateMessages, setCustomerProfile, setLoadingMessages, setLoadingProfile])
+  }, [loadConversationData, selectedConversationId])
 
   const connectionTone = useMemo(() => {
     if (isConnected) return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
@@ -260,8 +270,23 @@ export function ChatArea() {
           {messages.length === 0 && (
             <div className="flex h-40 flex-col items-center justify-center rounded-xl border border-dashed border-zinc-800/70 bg-zinc-900/20 text-center">
               <MessageSquare className="mb-2 h-6 w-6 text-zinc-600" />
-              <p className="text-sm text-zinc-500">Nenhuma mensagem ainda</p>
-              <p className="mt-1 text-xs text-zinc-700">Envie a primeira resposta para iniciar o atendimento.</p>
+              <p className="text-sm text-zinc-500">
+                {loadError ? 'Não foi possível carregar a conversa' : 'Nenhuma mensagem ainda'}
+              </p>
+              <p className="mt-1 max-w-sm text-xs text-zinc-700">
+                {loadError ?? 'Envie a primeira resposta para iniciar o atendimento.'}
+              </p>
+              {loadError && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => void loadConversationData(selectedConversationId)}
+                  className="mt-3 h-7 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100"
+                >
+                  <RefreshCw className="mr-1 h-3 w-3" />
+                  Tentar novamente
+                </Button>
+              )}
             </div>
           )}
           {messages.map((message) => {

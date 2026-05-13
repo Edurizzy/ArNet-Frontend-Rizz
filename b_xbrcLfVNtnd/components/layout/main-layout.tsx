@@ -3,7 +3,6 @@
 import { useEffect } from 'react'
 import { cn } from '@/lib/utils'
 import { useNavigationStore, useSessionStore, useSystemStatusStore } from '@/stores/app-store'
-import { getCurrentUser, getSystemStatus } from '@/services/mock-api'
 import { AppSidebar } from '@/components/layout/app-sidebar'
 import { AppHeader } from '@/components/layout/app-header'
 import { AIActivityBar } from '@/components/layout/ai-activity-bar'
@@ -22,20 +21,14 @@ export function MainLayout() {
 
   // Initialize session and system status
   useEffect(() => {
-    const init = async () => {
-      setConnecting(true)
-      try {
-        const [user, status] = await Promise.all([
-          getCurrentUser(),
-          getSystemStatus(),
-        ])
-        setUser(user)
-        setStatus(status)
-      } catch (error) {
-        console.error('Failed to initialize:', error)
-      }
-    }
-    init()
+    setConnecting(true)
+    setUser(null)
+    setStatus({
+      websocket: navigator.onLine ? 'connecting' : 'disconnected',
+      aiAgentsActive: 0,
+      aiAgentsTotal: 0,
+      lastSync: new Date(),
+    })
   }, [setUser, setStatus, setConnecting])
 
   // Render current view based on route

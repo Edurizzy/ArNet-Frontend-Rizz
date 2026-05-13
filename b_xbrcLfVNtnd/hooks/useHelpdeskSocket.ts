@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react'
 import {
   helpdeskSocket,
   type HelpdeskConnectionState,
@@ -19,7 +19,17 @@ function getServerSocketSnapshot(): HelpdeskConnectionState {
   return 'disconnected'
 }
 
-export function useHelpdeskSocket(options: HelpdeskSocketOptions = {}) {
+type UseHelpdeskSocketOptions = HelpdeskSocketOptions & {
+  onResync?: (reason: 'visibility' | 'reconnect' | 'manual') => void
+}
+
+export function useHelpdeskSocket(options: UseHelpdeskSocketOptions = {}) {
+  const onResyncRef = useRef(options.onResync)
+
+  useEffect(() => {
+    onResyncRef.current = options.onResync
+  }, [options.onResync])
+
   const connectionState = useSyncExternalStore(
     subscribeToSocket,
     getSocketSnapshot,
@@ -40,6 +50,14 @@ export function useHelpdeskSocket(options: HelpdeskSocketOptions = {}) {
     options.heartbeatIntervalMs,
     options.heartbeatTimeoutMs,
   ])
+
+  useEffect(() => {
+    if (!options.onResync) return
+
+    return helpdeskSocket.subscribeResync((reason) => {
+      onResyncRef.current?.(reason)
+    })
+  }, [options.onResync])
 
   const reconnect = useCallback(() => {
     helpdeskSocket.reconnect()
