@@ -1,7 +1,7 @@
 'use client'
 
 import { memo } from 'react'
-import { Bot, Loader2, RefreshCcw } from 'lucide-react'
+import { AlertCircle, Bot, Check, CheckCheck, Loader2, RefreshCcw } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
@@ -36,16 +36,35 @@ function MessageBubbleComponent({ message, onRetry }: MessageBubbleProps) {
   const deliveryStatus = message.metadata?.deliveryStatus ?? message.metadata?.delivery_status
   const isSending = deliveryStatus === 'sending'
   const isFailed = deliveryStatus === 'failed'
+  const showOutboundTicks =
+    isAgent &&
+    !message.isInternal &&
+    (deliveryStatus === 'sending' ||
+      deliveryStatus === 'sent' ||
+      deliveryStatus === 'delivered' ||
+      deliveryStatus === 'read')
+
+  const deliveryLabel =
+    deliveryStatus === 'sending'
+      ? 'Enviando'
+      : deliveryStatus === 'sent'
+        ? 'Enviada'
+        : deliveryStatus === 'delivered'
+          ? 'Entregue'
+          : deliveryStatus === 'read'
+            ? 'Lida'
+            : deliveryStatus === 'failed'
+              ? 'Falhou ao enviar'
+              : undefined
 
   return (
     <div
       className={cn(
         "flex gap-3",
         !isCustomer && "flex-row-reverse",
-        isSending && "opacity-60"
+        isSending && "opacity-[0.92]"
       )}
     >
-      {/* Avatar */}
       <div className="shrink-0">
         {isCustomer && (
           <Avatar className="h-8 w-8 border border-zinc-700/50">
@@ -68,14 +87,12 @@ function MessageBubbleComponent({ message, onRetry }: MessageBubbleProps) {
         )}
       </div>
 
-      {/* Bubble */}
       <div
         className={cn(
           "max-w-[70%] space-y-1",
           !isCustomer && "items-end"
         )}
       >
-        {/* Sender name and AI indicator */}
         <div
           className={cn(
             "flex items-center gap-2 text-[10px]",
@@ -93,7 +110,6 @@ function MessageBubbleComponent({ message, onRetry }: MessageBubbleProps) {
           )}
         </div>
 
-        {/* Message content */}
         <div
           className={cn(
             "rounded-2xl px-4 py-2.5 text-sm",
@@ -112,23 +128,50 @@ function MessageBubbleComponent({ message, onRetry }: MessageBubbleProps) {
           <p className="whitespace-pre-wrap leading-relaxed">{message.content}</p>
         </div>
 
-        {/* Timestamp */}
         <div
           className={cn(
-            "flex items-center gap-2 text-[10px] text-zinc-600",
+            "flex flex-wrap items-center gap-2 text-[10px] text-zinc-600",
             !isCustomer && "justify-end text-right"
           )}
         >
           <span>{formatTime(message.timestamp)}</span>
-          {isSending && (
-            <span className="inline-flex items-center gap-1 text-amber-400">
-              <Loader2 className="h-3 w-3 animate-spin" />
-              enviando
+
+          {showOutboundTicks && deliveryLabel && (
+            <span
+              className="inline-flex items-center gap-1 text-zinc-500"
+              aria-label={deliveryLabel}
+              title={deliveryLabel}
+            >
+              {deliveryStatus === 'sending' && (
+                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-amber-400/90" aria-hidden />
+              )}
+              {deliveryStatus === 'sent' && (
+                <Check className="h-3.5 w-3.5 shrink-0 text-zinc-400" aria-hidden strokeWidth={2.5} />
+              )}
+              {(deliveryStatus === 'delivered' || deliveryStatus === 'read') && (
+                <CheckCheck
+                  className={cn(
+                    'h-3.5 w-3.5 shrink-0',
+                    deliveryStatus === 'read' ? 'text-sky-400' : 'text-zinc-400'
+                  )}
+                  aria-hidden
+                  strokeWidth={2.5}
+                />
+              )}
             </span>
           )}
+
+          {isSending && !showOutboundTicks && (
+            <span className="inline-flex items-center gap-1 text-amber-400">
+              <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+              <span>enviando</span>
+            </span>
+          )}
+
           {isFailed && (
             <span className="inline-flex items-center gap-1 text-red-400">
-              falhou
+              <AlertCircle className="h-3 w-3 shrink-0" aria-hidden />
+              <span>falhou</span>
               {onRetry && (
                 <Button
                   type="button"
@@ -137,7 +180,7 @@ function MessageBubbleComponent({ message, onRetry }: MessageBubbleProps) {
                   onClick={() => onRetry(message.id)}
                   className="h-5 px-1.5 text-[10px] text-red-300 hover:bg-red-500/10 hover:text-red-200"
                 >
-                  <RefreshCcw className="mr-1 h-3 w-3" />
+                  <RefreshCcw className="mr-1 h-3 w-3" aria-hidden />
                   tentar
                 </Button>
               )}

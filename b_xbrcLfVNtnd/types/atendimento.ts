@@ -21,6 +21,9 @@ export interface MessageMetadata {
   handoffTo?: string
   deliveryStatus?: 'sending' | 'sent' | 'delivered' | 'read' | 'failed'
   delivery_status?: 'sending' | 'sent' | 'delivered' | 'read' | 'failed'
+  /** WhatsApp Cloud API id (wamid); used to dedupe realtime vs REST */
+  providerMessageId?: string
+  provider_message_id?: string
   correlationId?: string
   correlation_id?: string
   optimisticId?: string

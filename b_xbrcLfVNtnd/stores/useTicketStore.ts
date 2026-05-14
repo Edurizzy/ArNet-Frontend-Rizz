@@ -46,7 +46,7 @@ function createPlaceholderTicket(ticket: TicketPatch): Conversation {
 
   return normalizeTicket({
     id: ticket.id,
-    customerId: ticket.customerId ?? ticket.id,
+    customerId: ticket.customerId ?? '',
     customerName: ticket.customerName ?? 'Cliente',
     channel: ticket.channel ?? 'whatsapp',
     status: ticket.status ?? 'open',
@@ -93,7 +93,7 @@ function mergeTicket(
   if (isOlder) {
     return normalizeTicket({
       ...existing,
-      customerId: existing.customerId || incomingTicket.customerId || existing.id,
+      customerId: existing.customerId || incomingTicket.customerId || '',
       customerName: existing.customerName || incomingTicket.customerName || 'Cliente',
       subject: existing.subject || incomingTicket.subject,
       lastMessage: existing.lastMessage || incomingTicket.lastMessage,

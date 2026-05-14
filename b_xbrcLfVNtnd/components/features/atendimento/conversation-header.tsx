@@ -13,6 +13,8 @@ import type { SLAInfo } from '@/types/atendimento'
 interface ConversationHeaderProps {
   conversation: Conversation
   slaInfo: SLAInfo | null
+  onResolveTicket?: () => void
+  isResolvingTicket?: boolean
 }
 
 const channelLabels: Record<string, { label: string; icon: React.ReactNode }> = {
@@ -32,7 +34,12 @@ function getInitials(name: string): string {
     .slice(0, 2)
 }
 
-export function ConversationHeader({ conversation, slaInfo }: ConversationHeaderProps) {
+export function ConversationHeader({
+  conversation,
+  slaInfo,
+  onResolveTicket,
+  isResolvingTicket,
+}: ConversationHeaderProps) {
   const { isCollapsed, toggleCollapsed } = useCustomerContextUIStore()
   const channel = channelLabels[conversation.channel] || channelLabels.chat
   const initials = getInitials(conversation.customerName)
@@ -76,10 +83,17 @@ export function ConversationHeader({ conversation, slaInfo }: ConversationHeader
         <Button
           variant="outline"
           size="sm"
-          className="h-8 gap-1.5 border-zinc-700/50 bg-zinc-800/50 text-xs text-zinc-300 hover:bg-zinc-700/50 hover:text-zinc-100"
+          type="button"
+          disabled={
+            conversation.status === 'resolved' || !onResolveTicket || Boolean(isResolvingTicket)
+          }
+          onClick={onResolveTicket}
+          className="h-8 gap-1.5 border-zinc-700/50 bg-zinc-800/50 text-xs text-zinc-300 hover:bg-zinc-700/50 hover:text-zinc-100 disabled:opacity-50"
         >
           <CheckCircle className="h-3.5 w-3.5" />
-          <span className="hidden sm:inline">Marcar como Resolvido</span>
+          <span className="hidden sm:inline">
+            {conversation.status === 'resolved' ? 'Resolvido' : 'Marcar como Resolvido'}
+          </span>
         </Button>
         <Button
           variant="outline"

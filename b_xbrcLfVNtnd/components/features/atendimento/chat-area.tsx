@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { MessageSquare, RefreshCw, Wifi, WifiOff } from 'lucide-react'
+import { toast } from 'sonner'
 import { useShallow } from 'zustand/react/shallow'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
@@ -20,6 +21,7 @@ import {
   getConversationMessages,
   getCustomerProfile,
   getSLAInfo,
+  postTicketStatusUpdate,
   sendMessage,
 } from '@/services/atendimento-api'
 import type { SLAInfo } from '@/types/atendimento'
@@ -86,6 +88,7 @@ export function ChatArea() {
   const shouldStickToBottomRef = useRef(true)
   const [slaInfo, setSlaInfo] = useState<SLAInfo | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [isResolvingTicket, setIsResolvingTicket] = useState(false)
   
   const selectedConversationId = useActiveConversationStore((state) => state.selectedConversationId)
   const conversation = useActiveConversationStore((state) => state.conversation)
@@ -96,9 +99,9 @@ export function ChatArea() {
   const setLoadingProfile = useActiveConversationStore((state) => state.setLoadingProfile)
   const setSendingMessage = useActiveConversationStore((state) => state.setSendingMessage)
   const hydrateMessages = useMessageStore((state) => state.hydrateMessages)
-  const addMessage = useMessageStore((state) => state.addMessage)
   const replaceOptimisticMessage = useMessageStore((state) => state.replaceOptimisticMessage)
   const markMessageFailed = useMessageStore((state) => state.markMessageFailed)
+  const resetOutboundToSending = useMessageStore((state) => state.resetOutboundToSending)
   const updateTicket = useTicketStore((state) => state.updateTicket)
   const messages = useMessageStore(
     useShallow((state) => {
@@ -127,9 +130,13 @@ export function ChatArea() {
       hydrateMessages(conversationId, messagesData)
       setSlaInfo(sla)
 
-      const profile = await getCustomerProfile(conversationData.customerId, { signal })
-      if (signal?.aborted) return
-      setCustomerProfile(profile)
+      if (conversationData.customerId) {
+        const profile = await getCustomerProfile(conversationData.customerId, { signal })
+        if (signal?.aborted) return
+        setCustomerProfile(profile)
+      } else {
+        setCustomerProfile(null)
+      }
     } catch (error) {
       if (signal?.aborted) return
       setLoadError(error instanceof Error ? error.message : 'Falha ao carregar conversa')
@@ -152,6 +159,49 @@ export function ChatArea() {
     if (!selectedConversationId) return
     void loadConversationData(selectedConversationId)
   }, [loadConversationData, selectedConversationId])
+
+  const handleResolveTicket = useCallback(async () => {
+    if (!selectedConversationId || !conversation || conversation.status === 'resolved') return
+
+    const previous = conversation
+    const now = new Date()
+    const optimistic = {
+      ...conversation,
+      status: 'resolved' as const,
+      updatedAt: now,
+      resolvedAt: now,
+    }
+    setConversation(optimistic)
+    updateTicket({
+      id: selectedConversationId,
+      status: 'resolved',
+      updatedAt: now,
+      resolvedAt: now,
+      eventTimestamp: now,
+    })
+
+    setIsResolvingTicket(true)
+    try {
+      const updated = await postTicketStatusUpdate(selectedConversationId, { status: 'resolved' })
+      setConversation(updated)
+      updateTicket({
+        ...updated,
+        eventTimestamp: new Date(),
+      })
+    } catch {
+      setConversation(previous)
+      updateTicket({
+        id: previous.id,
+        status: previous.status,
+        updatedAt: previous.updatedAt,
+        resolvedAt: previous.resolvedAt,
+        eventTimestamp: new Date(),
+      })
+      toast.error('Não foi possível marcar o ticket como resolvido.')
+    } finally {
+      setIsResolvingTicket(false)
+    }
+  }, [conversation, selectedConversationId, setConversation, updateTicket])
 
   const { connectionState, isConnected, reconnect } = useHelpdeskSocket({
     onResync: handleSocketResync,
@@ -196,33 +246,29 @@ export function ChatArea() {
     const failedMessage = useMessageStore.getState().messagesById[messageId]
     if (!failedMessage) return
 
-    const correlationId = `retry-${crypto.randomUUID()}`
-    addMessage({
-      ...failedMessage,
-      metadata: {
-        ...failedMessage.metadata,
-        deliveryStatus: 'sending',
-        delivery_status: 'sending',
-        correlationId,
-        correlation_id: correlationId,
-      },
-    })
+    const correlationId =
+      failedMessage.metadata?.correlationId ?? failedMessage.metadata?.correlation_id
+    if (!correlationId) return
+
+    resetOutboundToSending(correlationId)
 
     setSendingMessage(true)
     try {
       const confirmedMessage = await sendMessage(
         failedMessage.conversationId,
         failedMessage.content,
-        Boolean(failedMessage.isInternal),
-        correlationId
+        correlationId,
+        {
+          isInternal: Boolean(failedMessage.isInternal),
+        }
       )
       replaceOptimisticMessage(correlationId, confirmedMessage)
     } catch (error) {
-      markMessageFailed(messageId, error instanceof Error ? error.message : 'Falha ao reenviar')
+      markMessageFailed(correlationId, error instanceof Error ? error.message : 'Falha ao reenviar')
     } finally {
       setSendingMessage(false)
     }
-  }, [addMessage, markMessageFailed, replaceOptimisticMessage, setSendingMessage])
+  }, [markMessageFailed, replaceOptimisticMessage, resetOutboundToSending, setSendingMessage])
 
   if (!selectedConversationId) {
     return <EmptyState />
@@ -239,7 +285,12 @@ export function ChatArea() {
         <div className="flex items-center justify-between gap-3 pr-4">
           <div className="min-w-0 flex-1">
             {conversation && (
-              <ConversationHeader conversation={conversation} slaInfo={slaInfo} />
+              <ConversationHeader
+                conversation={conversation}
+                slaInfo={slaInfo}
+                onResolveTicket={handleResolveTicket}
+                isResolvingTicket={isResolvingTicket}
+              />
             )}
           </div>
           <Badge variant="outline" className={cn('gap-1.5 whitespace-nowrap text-[10px]', connectionTone)}>

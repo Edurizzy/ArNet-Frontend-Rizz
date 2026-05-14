@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import { Paperclip, EyeOff, Send } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -19,45 +19,55 @@ export function MessageComposer({ conversationId }: MessageComposerProps) {
   const { content, isInternalNote, setContent, setInternalNote, reset } = useComposerStore()
   const setSendingMessage = useActiveConversationStore((state) => state.setSendingMessage)
   const isSendingMessage = useActiveConversationStore((state) => state.isSendingMessage)
-  const addMessage = useMessageStore((state) => state.addMessage)
+  const addOptimisticMessage = useMessageStore((state) => state.addOptimisticMessage)
   const replaceOptimisticMessage = useMessageStore((state) => state.replaceOptimisticMessage)
   const markMessageFailed = useMessageStore((state) => state.markMessageFailed)
 
+  const sendLatchRef = useRef(false)
+  const abortRef = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort()
+    }
+  }, [])
+
   const handleSend = useCallback(async () => {
-    if (!content.trim() || isSendingMessage) return
+    if (!content.trim() || isSendingMessage || sendLatchRef.current) return
 
     const messageContent = content.trim()
-    const tempId = `tmp-${crypto.randomUUID()}`
     const correlationId = crypto.randomUUID()
 
-    addMessage({
-      id: tempId,
-      conversationId,
-      type: 'agent',
+    sendLatchRef.current = true
+    abortRef.current?.abort()
+    const abortController = new AbortController()
+    abortRef.current = abortController
+
+    addOptimisticMessage(conversationId, {
       content: messageContent,
-      timestamp: new Date(),
+      correlationId,
+      isInternal: isInternalNote,
       senderName: 'Joana',
       senderId: 'user-001',
-      isInternal: isInternalNote,
-      metadata: {
-        deliveryStatus: 'sending',
-        delivery_status: 'sending',
-        correlationId,
-        correlation_id: correlationId,
-        optimisticId: tempId,
-        optimistic_id: tempId,
-      },
     })
     reset()
     setSendingMessage(true)
 
     try {
-      const newMessage = await sendMessage(conversationId, messageContent, isInternalNote, correlationId)
+      const newMessage = await sendMessage(conversationId, messageContent, correlationId, {
+        isInternal: isInternalNote,
+        signal: abortController.signal,
+      })
       replaceOptimisticMessage(correlationId, newMessage)
     } catch (error) {
+      if (abortController.signal.aborted) return
       console.error('Failed to send message:', error)
-      markMessageFailed(tempId, error instanceof Error ? error.message : 'Falha ao enviar')
+      markMessageFailed(correlationId, error instanceof Error ? error.message : 'Falha ao enviar')
     } finally {
+      sendLatchRef.current = false
+      if (abortRef.current === abortController) {
+        abortRef.current = null
+      }
       setSendingMessage(false)
     }
   }, [
@@ -66,7 +76,7 @@ export function MessageComposer({ conversationId }: MessageComposerProps) {
     conversationId,
     isSendingMessage,
     setSendingMessage,
-    addMessage,
+    addOptimisticMessage,
     replaceOptimisticMessage,
     markMessageFailed,
     reset,
@@ -76,7 +86,7 @@ export function MessageComposer({ conversationId }: MessageComposerProps) {
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault()
-        handleSend()
+        void handleSend()
       }
     },
     [handleSend]
@@ -84,7 +94,6 @@ export function MessageComposer({ conversationId }: MessageComposerProps) {
 
   return (
     <div className="border-t border-zinc-800/30 bg-zinc-900/30 p-4">
-      {/* Internal note indicator */}
       {isInternalNote && (
         <div className="mb-2 flex items-center gap-1.5 text-xs text-amber-400">
           <EyeOff className="h-3 w-3" />
@@ -93,7 +102,6 @@ export function MessageComposer({ conversationId }: MessageComposerProps) {
       )}
 
       <div className="flex items-end gap-2">
-        {/* Left actions */}
         <div className="flex gap-1">
           <TooltipProvider>
             <Tooltip>
@@ -133,7 +141,6 @@ export function MessageComposer({ conversationId }: MessageComposerProps) {
           </TooltipProvider>
         </div>
 
-        {/* Input */}
         <Textarea
           value={content}
           onChange={(e) => setContent(e.target.value)}
@@ -147,9 +154,8 @@ export function MessageComposer({ conversationId }: MessageComposerProps) {
           rows={1}
         />
 
-        {/* Send button */}
         <Button
-          onClick={handleSend}
+          onClick={() => void handleSend()}
           disabled={!content.trim() || isSendingMessage}
           size="icon"
           className={cn(

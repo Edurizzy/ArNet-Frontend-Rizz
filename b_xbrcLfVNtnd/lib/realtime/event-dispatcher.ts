@@ -105,6 +105,31 @@ function getMetadataString(metadata: Record<string, unknown>, key: string) {
   return getString(metadata[key])
 }
 
+type UiDeliveryStatus = NonNullable<Message['metadata']>['deliveryStatus']
+
+function mapBackendDeliveryToUi(raw: string | undefined): UiDeliveryStatus | undefined {
+  if (!raw) return undefined
+  const v = raw.trim().toLowerCase()
+  if (v === 'queued' || v === 'pending' || v === 'sending') return 'sending'
+  if (v === 'sent' || v === 'delivered' || v === 'read' || v === 'failed') return v as UiDeliveryStatus
+  return undefined
+}
+
+function resolveSocketDeliveryStatus(
+  messageBody: Record<string, unknown>,
+  metadata: Record<string, unknown>,
+  safeType: Message['type']
+): UiDeliveryStatus | undefined {
+  const fromTop = mapBackendDeliveryToUi(getString(messageBody.delivery_status) ?? undefined)
+  if (fromTop) return fromTop
+  const fromMeta = mapBackendDeliveryToUi(
+    getMetadataString(metadata, 'delivery_status') ?? getMetadataString(metadata, 'deliveryStatus')
+  )
+  if (fromMeta) return fromMeta
+  if (safeType === 'agent') return 'sent'
+  return undefined
+}
+
 function normalizeMessage(body: Record<string, unknown>, envelope: SocketEnvelope): Message | null {
   const messageBody = isRecord(body.message) ? body.message : body
   const ticketBody = isRecord(body.ticket) ? body.ticket : body
@@ -136,6 +161,12 @@ function normalizeMessage(body: Record<string, unknown>, envelope: SocketEnvelop
   const createdAt = getString(messageBody.created_at) ?? getString(messageBody.createdAt)
   const updatedAt = getString(messageBody.updated_at) ?? getString(messageBody.updatedAt)
   const eventTimestamp = envelope.event_timestamp ?? envelope.timestamp
+  const deliveryStatus = resolveSocketDeliveryStatus(messageBody, metadata, safeType)
+  const providerMessageId =
+    getString(messageBody.provider_message_id) ??
+    getString(messageBody.providerMessageId) ??
+    getMetadataString(metadata, 'provider_message_id') ??
+    getMetadataString(metadata, 'providerMessageId')
 
   return {
     id,
@@ -148,12 +179,14 @@ function normalizeMessage(body: Record<string, unknown>, envelope: SocketEnvelop
     isInternal: Boolean(messageBody.is_internal ?? messageBody.isInternal),
     metadata: {
       ...metadata,
-      deliveryStatus: safeType === 'agent' ? 'sent' : undefined,
-      delivery_status: safeType === 'agent' ? 'sent' : undefined,
+      ...(deliveryStatus ? { deliveryStatus, delivery_status: deliveryStatus } : {}),
       correlationId,
       correlation_id: correlationId,
       optimisticId,
       optimistic_id: optimisticId,
+      ...(providerMessageId
+        ? { providerMessageId, provider_message_id: providerMessageId }
+        : {}),
       createdAt,
       created_at: createdAt,
       updatedAt,
@@ -182,10 +215,11 @@ function normalizeTicket(body: Record<string, unknown>, envelope: SocketEnvelope
     getString(messageBody?.content)
 
   const unreadCount = getNumber(ticketBody.unread_count) ?? getNumber(ticketBody.unreadCount)
+  const customerId = getString(ticketBody.customer_id)
 
   return {
     id,
-    customerId: getString(ticketBody.customer_id) ?? id,
+    ...(customerId ? { customerId } : {}),
     customerName: getString(ticketBody.customer_name) ?? getString(metadata.customer_name) ?? 'Cliente',
     channel: mapChannel(getString(ticketBody.channel)),
     status: mapStatus(getString(ticketBody.status)),
@@ -279,6 +313,19 @@ function dispatchNow(rawPayload: unknown, context: DispatchContext = {}) {
     ...ticket,
     eventTimestamp: envelope.event_timestamp ?? envelope.timestamp,
   })
+
+  const selectedId = useActiveConversationStore.getState().selectedConversationId
+  if (selectedId === ticket.id) {
+    const current = useActiveConversationStore.getState().conversation
+    if (current) {
+      const { eventTimestamp, ...incoming } = ticket
+    void eventTimestamp
+      useActiveConversationStore.getState().setConversation({
+        ...current,
+        ...incoming,
+      })
+    }
+  }
 }
 
 function flushEvents() {

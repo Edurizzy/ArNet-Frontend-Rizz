@@ -30,7 +30,7 @@ interface RefreshResponse {
   access: string
 }
 
-class ApiClientError extends Error {
+export class ApiClientError extends Error {
   status: number
   data: unknown
 

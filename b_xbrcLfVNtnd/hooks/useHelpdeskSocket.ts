@@ -6,6 +6,8 @@ import {
   type HelpdeskConnectionState,
   type HelpdeskSocketOptions,
 } from '@/lib/realtime/helpdesk-socket'
+import { useSystemStatusStore } from '@/stores/app-store'
+import type { SystemStatus } from '@/types/domain'
 
 function subscribeToSocket(listener: (state: HelpdeskConnectionState) => void) {
   return helpdeskSocket.subscribe(listener)
@@ -23,12 +25,55 @@ type UseHelpdeskSocketOptions = HelpdeskSocketOptions & {
   onResync?: (reason: 'visibility' | 'reconnect' | 'manual') => void
 }
 
+function mapSocketToSystemWebsocket(state: HelpdeskConnectionState): SystemStatus['websocket'] {
+  if (state === 'connected') return 'connected'
+  if (state === 'failed') return 'error'
+  if (state === 'disconnected') return 'disconnected'
+  return 'connecting'
+}
+
 export function useHelpdeskSocket(options: UseHelpdeskSocketOptions = {}) {
   const onResyncRef = useRef(options.onResync)
 
   useEffect(() => {
     onResyncRef.current = options.onResync
   }, [options.onResync])
+
+  // Mirror helpdesk WebSocket state into the global header badge (Zustand).
+  useEffect(() => {
+    const unsub = helpdeskSocket.subscribe((state) => {
+      useSystemStatusStore.setState((prev) => {
+        const prevStatus = prev.status
+        return {
+          status: {
+            websocket: mapSocketToSystemWebsocket(state),
+            aiAgentsActive: prevStatus?.aiAgentsActive ?? 0,
+            aiAgentsTotal: prevStatus?.aiAgentsTotal ?? 0,
+            lastSync: new Date(),
+          },
+          isConnecting: false,
+        }
+      })
+    })
+
+    return () => {
+      unsub()
+      useSystemStatusStore.setState((prev) => {
+        const prevStatus = prev.status
+        return {
+          status: prevStatus
+            ? { ...prevStatus, websocket: 'disconnected', lastSync: new Date() }
+            : {
+                websocket: 'disconnected',
+                aiAgentsActive: 0,
+                aiAgentsTotal: 0,
+                lastSync: new Date(),
+              },
+          isConnecting: false,
+        }
+      })
+    }
+  }, [])
 
   const connectionState = useSyncExternalStore(
     subscribeToSocket,

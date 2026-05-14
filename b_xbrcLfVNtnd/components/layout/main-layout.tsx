@@ -24,7 +24,7 @@ export function MainLayout() {
     setConnecting(true)
     setUser(null)
     setStatus({
-      websocket: navigator.onLine ? 'connecting' : 'disconnected',
+      websocket: 'disconnected',
       aiAgentsActive: 0,
       aiAgentsTotal: 0,
       lastSync: new Date(),

@@ -6,6 +6,10 @@ type RequestOptions = {
   signal?: AbortSignal
 }
 
+export type SendMessageOptions = RequestOptions & {
+  isInternal?: boolean
+}
+
 type PaginatedResponse<T> = {
   results?: T[]
   count?: number
@@ -44,6 +48,9 @@ type MessageApi = {
   metadata?: Record<string, unknown>
   created_at?: string
   updated_at?: string
+  correlation_id?: string | null
+  delivery_status?: string | null
+  provider_message_id?: string | null
 }
 
 type DeliveryStatus = NonNullable<Message['metadata']>['deliveryStatus']
@@ -95,18 +102,21 @@ function getMetadataString(metadata: Record<string, unknown> | undefined, key: s
   return metadata ? asString(metadata[key]) : undefined
 }
 
-function asDeliveryStatus(value: string | undefined): DeliveryStatus | undefined {
-  if (
-    value === 'sending' ||
-    value === 'sent' ||
-    value === 'delivered' ||
-    value === 'read' ||
-    value === 'failed'
-  ) {
-    return value
-  }
-
+/** Backend pipeline states mapped into UI ladder starting at `sending` */
+function mapBackendDeliveryToUi(raw: string | undefined): DeliveryStatus | undefined {
+  if (!raw) return undefined
+  const v = raw.trim().toLowerCase()
+  if (v === 'queued' || v === 'pending' || v === 'sending') return 'sending'
+  if (v === 'sent' || v === 'delivered' || v === 'read' || v === 'failed') return v as DeliveryStatus
   return undefined
+}
+
+function resolveDeliveryStatus(message: MessageApi): DeliveryStatus | undefined {
+  const fromTop = mapBackendDeliveryToUi(message.delivery_status ?? undefined)
+  if (fromTop) return fromTop
+  return mapBackendDeliveryToUi(
+    getMetadataString(message.metadata, 'delivery_status') ?? getMetadataString(message.metadata, 'deliveryStatus')
+  )
 }
 
 function normalizeTicket(ticket: TicketApi): Conversation {
@@ -118,9 +128,10 @@ function normalizeTicket(ticket: TicketApi): Conversation {
     asString(metadata.latest_message) ??
     ticket.title
 
+  const customerId = asString(ticket.customer_id)
   return {
     id: ticket.id,
-    customerId: ticket.customer_id ?? ticket.id,
+    customerId: customerId ?? '',
     customerName: ticket.customer_name ?? 'Cliente',
     channel: mapChannel(ticket.channel),
     status: mapStatus(ticket.status),
@@ -138,9 +149,22 @@ function normalizeTicket(ticket: TicketApi): Conversation {
 
 function normalizeMessage(message: MessageApi, ticketId: string): Message {
   const metadata = message.metadata ?? {}
-  const deliveryStatus = asDeliveryStatus(
-    getMetadataString(metadata, 'delivery_status') ?? getMetadataString(metadata, 'deliveryStatus')
-  )
+  const deliveryStatus = resolveDeliveryStatus(message)
+  const correlationFromModel =
+    message.correlation_id != null && String(message.correlation_id).trim()
+      ? String(message.correlation_id)
+      : undefined
+  const correlationFromMeta =
+    getMetadataString(metadata, 'correlation_id') ?? getMetadataString(metadata, 'correlationId')
+  const correlationId = correlationFromModel ?? correlationFromMeta
+
+  const providerFromModel =
+    message.provider_message_id != null && String(message.provider_message_id).trim()
+      ? String(message.provider_message_id)
+      : undefined
+  const providerFromMeta =
+    getMetadataString(metadata, 'provider_message_id') ?? getMetadataString(metadata, 'providerMessageId')
+  const providerMessageId = providerFromModel ?? providerFromMeta
 
   return {
     id: message.id,
@@ -154,10 +178,13 @@ function normalizeMessage(message: MessageApi, ticketId: string): Message {
     metadata: {
       ...metadata,
       ...(deliveryStatus ? { deliveryStatus, delivery_status: deliveryStatus } : {}),
-      correlationId: getMetadataString(metadata, 'correlation_id') ?? getMetadataString(metadata, 'correlationId'),
-      correlation_id: getMetadataString(metadata, 'correlation_id') ?? getMetadataString(metadata, 'correlationId'),
+      correlationId: correlationId ?? getMetadataString(metadata, 'correlationId'),
+      correlation_id: correlationId ?? getMetadataString(metadata, 'correlation_id'),
       optimisticId: getMetadataString(metadata, 'optimistic_id') ?? getMetadataString(metadata, 'optimisticId'),
       optimistic_id: getMetadataString(metadata, 'optimistic_id') ?? getMetadataString(metadata, 'optimisticId'),
+      ...(providerMessageId
+        ? { providerMessageId, provider_message_id: providerMessageId }
+        : {}),
       updatedAt: message.updated_at,
       updated_at: message.updated_at,
     },
@@ -247,27 +274,59 @@ export async function getSLAInfo(
   }
 }
 
+/**
+ * Outbound WhatsApp: `POST /helpdesk/tickets/{id}/messages/` (Celery pipeline + correlation_id on row).
+ * Internal notes: `POST /helpdesk/messages/` with `is_internal: true` and correlation in metadata only.
+ */
 export async function sendMessage(
-  conversationId: string,
+  ticketId: string,
   content: string,
-  isInternal: boolean,
-  correlationId?: string,
-  options: RequestOptions = {}
+  correlationId: string,
+  options: SendMessageOptions = {}
 ): Promise<Message> {
-  const { data: message } = await apiClient.post<MessageApi>('/helpdesk/messages/', {
-    ticket_id: conversationId,
-    sender_type: 'agent',
-    direction: 'outbound',
-    content,
-    is_internal: isInternal,
-    external_message_id: correlationId,
-    metadata: {
-      correlation_id: correlationId,
-      delivery_status: 'sent',
-    },
-  }, {
-    signal: options.signal,
-  })
+  const trimmed = content.trim()
+  const { signal, isInternal = false } = options
 
-  return normalizeMessage(message, conversationId)
+  if (isInternal) {
+    const { data: message } = await apiClient.post<MessageApi>(
+      '/helpdesk/messages/',
+      {
+        ticket_id: ticketId,
+        sender_type: 'agent',
+        direction: 'outbound',
+        content: trimmed,
+        is_internal: true,
+        metadata: {
+          correlation_id: correlationId,
+          delivery_status: 'sent',
+        },
+      },
+      { signal }
+    )
+    return normalizeMessage(message, ticketId)
+  }
+
+  const { data: message } = await apiClient.post<MessageApi>(
+    `/helpdesk/tickets/${ticketId}/messages/`,
+    {
+      content: trimmed,
+      correlation_id: correlationId,
+    },
+    { signal }
+  )
+
+  return normalizeMessage(message, ticketId)
+}
+
+export async function postTicketStatusUpdate(
+  ticketId: string,
+  body: { status: string; reason?: string },
+  options: RequestOptions = {}
+): Promise<Conversation> {
+  const { data } = await apiClient.post<TicketApi>(
+    `/helpdesk/tickets/${ticketId}/update-status/`,
+    body,
+    { signal: options.signal }
+  )
+  return normalizeTicket(data)
 }
